@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lampbearer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=Space+Grotesk:wght@400;600&display=swap">
+<style>
+/* Layout: one dark arcade cabinet, canvas centred, HUD above, help below. Single deliberate night theme. */
+:root {
+  --night: #0b1020;
+  --deep: #131a33;
+  --flame: #ffc94a;
+  --glow: #fff3c4;
+  --shade: #6b5bd6;
+  --ink: #e9e6f5;
+  --muted: #9aa0c3;
+  --display: "Silkscreen", ui-monospace, monospace;
+  --body: "Space Grotesk", system-ui, sans-serif;
+  color-scheme: dark;
+}
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--night); color: var(--ink); font-family: var(--body);
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding-block: 12px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  box-sizing: border-box;
+}
+h1 { font-family: var(--display); font-weight: 700; color: var(--flame); margin: 0; font-size: 1.5rem; letter-spacing: .06em; text-wrap: balance; text-align: center; }
+.hud { display: flex; gap: 18px; font-family: var(--display); font-size: .8rem; color: var(--muted); font-variant-numeric: tabular-nums; flex-wrap: wrap; justify-content: center; }
+.hud b { color: var(--glow); font-weight: 400; }
+.cab { position: relative; width: min(100%, 420px, calc((100dvh - 190px) * 0.5625)); aspect-ratio: 9 / 16; max-width: 100%; }
+canvas { width: 100%; height: 100%; display: block; border: 2px solid var(--deep); border-radius: 6px; background: var(--night); touch-action: none; }
+.help { color: var(--muted); font-size: .8rem; text-align: center; max-width: 42ch; margin: 0; line-height: 1.5; }
+.help kbd { font-family: var(--display); color: var(--ink); font-size: .75rem; }
+button.pause { position: absolute; top: 8px; right: 8px; background: var(--deep); color: var(--ink); border: 1px solid var(--shade); font-family: var(--display); font-size: .7rem; padding: 6px 8px; cursor: pointer; border-radius: 3px; }
+button.pause:focus-visible { outline: 2px solid var(--flame); }
+</style>
+</head>
+<body>
+
+<h1>LAMPBEARER</h1>
+<div class="hud" aria-live="polite">
+  <span>SCORE <b id="score">0</b></span>
+  <span>WAVE <b id="wave">1</b></span>
+  <span>LAMPS <b id="lives">3</b></span>
+  <span>BEST <b id="best">0</b></span>
+</div>
+<div class="cab">
+  <canvas id="c" width="360" height="640" aria-label="Game area"></canvas>
+  <button class="pause" id="pauseBtn" type="button">PAUSE</button>
+</div>
+<p class="help">Move with <kbd>←</kbd> <kbd>→</kbd> or drag. Hold <kbd>SPACE</kbd> or touch to shine. Drive back the shadows and gather the nine fruits of the Spirit (Galatians 5:22–23).</p>
+
+<script>
+(() => {
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = 360, H = 640, GROUND = H - 70;
+const $ = id => document.getElementById(id);
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const FRUITS = [
+  { name: 'LOVE',         col: '#ff6b8a', fx: 'life' },
+  { name: 'JOY',          col: '#ffc94a', fx: 'double' },
+  { name: 'PEACE',        col: '#7fd6ff', fx: 'slow' },
+  { name: 'PATIENCE',     col: '#9be38a', fx: 'slow' },
+  { name: 'KINDNESS',     col: '#ffa36b', fx: 'spread' },
+  { name: 'GOODNESS',     col: '#f5e6a8', fx: 'clear' },
+  { name: 'FAITHFULNESS', col: '#b79cff', fx: 'shield' },
+  { name: 'GENTLENESS',   col: '#ffd1e8', fx: 'slow' },
+  { name: 'SELF-CONTROL', col: '#6be0c2', fx: 'rapid' },
+];
+
+let best = 0;
+try { best = +localStorage.getItem('lampbearer-best') || 0; } catch (e) {}
+$('best').textContent = best;
+
+const keys = {};
+let S;
+function reset() {
+  S = {
+    state: 'title', t: 0, score: 0, wave: 1, lives: 3,
+    p: { x: W / 2, w: 34, cd: 0 },
+    shots: [], foes: [], drops: [], sparks: [], toast: null,
+    fx: { double: 0, slow: 0, spread: 0, rapid: 0, shield: 0 },
+    got: new Set(), spawnLeft: 0, spawnT: 0, waveBanner: 0,
+  };
+  stars = Array.from({ length: 60 }, () => ({ x: Math.random() * W, y: Math.random() * GROUND, r: Math.random() * 1.4 + .3, p: Math.random() * 6 }));
+}
+let stars = [];
+reset();
+
+function startWave() {
+  S.spawnLeft = 8 + S.wave * 4;
+  S.spawnT = 0;
+  S.waveBanner = 2;
+}
+
+function spawnFoe() {
+  const big = S.wave > 2 && Math.random() < .18;
+  const r = big ? 22 : 13 + Math.random() * 4;
+  S.foes.push({
+    x: r + Math.random() * (W - 2 * r), y: -r, r,
+    hp: big ? 4 : 1 + (S.wave > 4 && Math.random() < .3 ? 1 : 0),
+    vy: (28 + S.wave * 6 + Math.random() * 18) * (big ? .6 : 1),
+    wob: Math.random() * 6, amp: 18 + Math.random() * 30, x0: 0, big,
+  });
+  S.foes[S.foes.length - 1].x0 = S.foes[S.foes.length - 1].x;
+}
+
+function toast(text, col) { S.toast = { text, col, t: 2.2 }; }
+
+function applyFruit(f) {
+  S.got.add(f.name);
+  const fx = f.fx;
+  if (fx === 'life') S.lives = Math.min(S.lives + 1, 6);
+  else if (fx === 'clear') { S.foes.forEach(o => { burst(o.x, o.y, '#f5e6a8'); S.score += 10; }); S.foes = []; }
+  else S.fx[fx] = 8;
+  toast(f.name, f.col);
+  if (S.got.size === 9) {
+    S.score += 1000; S.got.clear();
+    toast('FULL HARVEST +1000', '#fff3c4');
+  }
+}
+
+function burst(x, y, col, n = 14) {
+  if (reduce) n = 5;
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = 40 + Math.random() * 120;
+    S.sparks.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, t: .6, col });
+  }
+}
+
+function fire() {
+  const rate = S.fx.rapid > 0 ? .09 : .18;
+  if (S.p.cd > 0) return;
+  S.p.cd = rate;
+  const angles = S.fx.spread > 0 ? [-.22, 0, .22] : [0];
+  for (const a of angles) S.shots.push({ x: S.p.x, y: GROUND - 34, vx: Math.sin(a) * 420, vy: -Math.cos(a) * 420 });
+}
+
+function hurt() {
+  if (S.fx.shield > 0) { S.fx.shield = 0; toast('SHIELD HELD', '#b79cff'); return; }
+  S.lives--;
+  S.flash = .4;
+  if (S.lives <= 0) {
+    S.state = 'over';
+    if (S.score > best) { best = S.score; try { localStorage.setItem('lampbearer-best', best); } catch (e) {} }
+  }
+}
+
+function update(dt) {
+  S.t += dt;
+  if (S.state !== 'play') return;
+  for (const k in S.fx) S.fx[k] = Math.max(0, S.fx[k] - dt);
+  if (S.toast && (S.toast.t -= dt) <= 0) S.toast = null;
+  S.waveBanner = Math.max(0, S.waveBanner - dt);
+  S.flash = Math.max(0, (S.flash || 0) - dt);
+
+  // player
+  const sp = 260;
+  if (keys.ArrowLeft || keys.a) S.p.x -= sp * dt;
+  if (keys.ArrowRight || keys.d) S.p.x += sp * dt;
+  if (pointer.active) S.p.x += (pointer.x - S.p.x) * Math.min(1, dt * 14);
+  S.p.x = Math.max(20, Math.min(W - 20, S.p.x));
+  S.p.cd -= dt;
+  if (keys[' '] || pointer.active) fire();
+
+  // spawn
+  if (S.spawnLeft > 0) {
+    S.spawnT -= dt;
+    if (S.spawnT <= 0) { spawnFoe(); S.spawnLeft--; S.spawnT = Math.max(.35, 1.3 - S.wave * .08) * (.6 + Math.random() * .8); }
+  } else if (S.foes.length === 0) { S.wave++; S.score += 50 * S.wave; startWave(); }
+
+  const slow = S.fx.slow > 0 ? .45 : 1;
+  for (const s of S.shots) { s.x += s.vx * dt; s.y += s.vy * dt; }
+  S.shots = S.shots.filter(s => s.y > -10 && s.x > -10 && s.x < W + 10);
+
+  for (const o of S.foes) {
+    o.y += o.vy * dt * slow;
+    o.wob += dt * 1.6 * slow;
+    o.x = Math.max(o.r, Math.min(W - o.r, o.x0 + Math.sin(o.wob) * o.amp));
+  }
+  // collisions
+  for (const o of S.foes) {
+    for (const s of S.shots) {
+      if (s.dead) continue;
+      if ((s.x - o.x) ** 2 + (s.y - o.y) ** 2 < (o.r + 4) ** 2) {
+        s.dead = true; o.hp--; o.hit = .1;
+        if (o.hp <= 0) {
+          o.dead = true;
+          S.score += (o.big ? 40 : 10) * (S.fx.double > 0 ? 2 : 1);
+          burst(o.x, o.y, '#fff3c4');
+          if (Math.random() < (o.big ? .7 : .14)) {
+            const f = FRUITS[Math.floor(Math.random() * FRUITS.length)];
+            S.drops.push({ x: o.x, y: o.y, f, vy: 70 });
+          }
+        }
+        break;
+      }
+    }
+    o.hit = Math.max(0, (o.hit || 0) - dt);
+    if (!o.dead && o.y + o.r > GROUND) { o.dead = true; burst(o.x, GROUND, '#6b5bd6'); hurt(); }
+    else if (!o.dead && Math.abs(o.x - S.p.x) < o.r + 14 && o.y + o.r > GROUND - 40) { o.dead = true; burst(o.x, o.y, '#6b5bd6'); hurt(); }
+  }
+  S.foes = S.foes.filter(o => !o.dead);
+  S.shots = S.shots.filter(s => !s.dead);
+
+  for (const d of S.drops) {
+    d.y += d.vy * dt;
+    if (d.y > GROUND - 40 && Math.abs(d.x - S.p.x) < 26) { d.dead = true; applyFruit(d.f); }
+    if (d.y > GROUND) d.dead = true;
+  }
+  S.drops = S.drops.filter(d => !d.dead);
+
+  for (const p of S.sparks) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 120 * dt; p.t -= dt; }
+  S.sparks = S.sparks.filter(p => p.t > 0);
+
+  $('score').textContent = S.score; $('wave').textContent = S.wave;
+  $('lives').textContent = S.lives; $('best').textContent = best;
+}
+
+// ---------- drawing ----------
+function drawLamp(x, y) {
+  const r = S.fx.double > 0 ? 120 : 90;
+  const g = ctx.createRadialGradient(x, y - 26, 4, x, y - 26, r);
+  g.addColorStop(0, 'rgba(255,201,74,.35)'); g.addColorStop(1, 'rgba(255,201,74,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y - 26, r, 0, 7); ctx.fill();
+  // oil lamp body
+  ctx.fillStyle = '#c98a3a';
+  ctx.beginPath(); ctx.ellipse(x, y - 8, 20, 9, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#e0a552';
+  ctx.beginPath(); ctx.moveTo(x + 14, y - 12); ctx.lineTo(x + 26, y - 18); ctx.lineTo(x + 18, y - 6); ctx.fill();
+  ctx.fillRect(x - 8, y - 2, 16, 6);
+  // flame
+  const fl = Math.sin(S.t * 18) * 2;
+  ctx.fillStyle = '#ffc94a';
+  ctx.beginPath(); ctx.moveTo(x + 22, y - 20); ctx.quadraticCurveTo(x + 30, y - 32, x + 23 + fl * .3, y - 42 + fl); ctx.quadraticCurveTo(x + 16, y - 30, x + 22, y - 20); ctx.fill();
+  ctx.fillStyle = '#fff3c4';
+  ctx.beginPath(); ctx.arc(x + 23, y - 26, 3, 0, 7); ctx.fill();
+  if (S.fx.shield > 0) { ctx.strokeStyle = 'rgba(183,156,255,.7)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y - 14, 32, 0, 7); ctx.stroke(); }
+}
+
+function drawFoe(o) {
+  ctx.save(); ctx.translate(o.x, o.y);
+  const pulse = 1 + Math.sin(S.t * 4 + o.wob) * .05;
+  ctx.scale(pulse, pulse);
+  ctx.fillStyle = o.hit > 0 ? '#c9c2ff' : (o.big ? '#2a2257' : '#3a2f78');
+  ctx.beginPath();
+  const n = 9;
+  for (let i = 0; i <= n; i++) {
+    const a = (i / n) * Math.PI * 2, rr = o.r * (1 + Math.sin(a * 3 + S.t * 3 + o.wob) * .12);
+    i ? ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr) : ctx.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
+  }
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.75)';
+  ctx.beginPath(); ctx.arc(-o.r * .3, -o.r * .1, o.r * .12, 0, 7); ctx.arc(o.r * .3, -o.r * .1, o.r * .12, 0, 7); ctx.fill();
+  ctx.restore();
+}
+
+function draw() {
+  ctx.fillStyle = '#0b1020'; ctx.fillRect(0, 0, W, H);
+  for (const s of stars) { ctx.globalAlpha = .4 + Math.sin(S.t * 2 + s.p) * .3; ctx.fillStyle = '#e9e6f5'; ctx.fillRect(s.x, s.y, s.r, s.r); }
+  ctx.globalAlpha = 1;
+  // hills
+  ctx.fillStyle = '#131a33';
+  ctx.beginPath(); ctx.moveTo(0, GROUND);
+  for (let x = 0; x <= W; x += 20) ctx.lineTo(x, GROUND - 10 - Math.sin(x / 50) * 8);
+  ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.fill();
+
+  for (const d of S.drops) {
+    ctx.fillStyle = d.f.col; ctx.beginPath(); ctx.arc(d.x, d.y, 8, 0, 7); ctx.fill();
+    ctx.fillStyle = '#9be38a'; ctx.fillRect(d.x - 1, d.y - 13, 2, 6);
+  }
+  ctx.strokeStyle = '#fff3c4'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  for (const s of S.shots) { ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(s.x - s.vx * .03, s.y - s.vy * .03); ctx.stroke(); }
+  S.foes.forEach(drawFoe);
+  for (const p of S.sparks) { ctx.globalAlpha = p.t / .6; ctx.fillStyle = p.col; ctx.fillRect(p.x, p.y, 3, 3); }
+  ctx.globalAlpha = 1;
+  drawLamp(S.p.x, GROUND + 12);
+
+  // harvest row
+  ctx.font = '9px Silkscreen, monospace'; ctx.textAlign = 'left';
+  FRUITS.forEach((f, i) => {
+    const x = 14 + i * 37, y = H - 22;
+    ctx.globalAlpha = S.got.has(f.name) ? 1 : .22;
+    ctx.fillStyle = f.col; ctx.beginPath(); ctx.arc(x + 6, y, 6, 0, 7); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#9aa0c3'; ctx.fillText('HARVEST ' + S.got.size + '/9', 14, H - 6);
+
+  // active effects
+  const act = Object.entries(S.fx).filter(([, v]) => v > 0).map(([k]) => k.toUpperCase());
+  if (act.length) { ctx.textAlign = 'right'; ctx.fillStyle = '#ffc94a'; ctx.fillText(act.join(' · '), W - 12, H - 6); }
+
+  ctx.textAlign = 'center';
+  if (S.flash > 0) { ctx.fillStyle = `rgba(107,91,214,${S.flash})`; ctx.fillRect(0, 0, W, H); }
+  if (S.toast) { ctx.globalAlpha = Math.min(1, S.toast.t); ctx.font = '700 18px Silkscreen, monospace'; ctx.fillStyle = S.toast.col; ctx.fillText(S.toast.text, W / 2, 120); ctx.globalAlpha = 1; }
+  if (S.waveBanner > 0 && S.state === 'play') { ctx.globalAlpha = Math.min(1, S.waveBanner); ctx.font = '700 26px Silkscreen, monospace'; ctx.fillStyle = '#e9e6f5'; ctx.fillText('WAVE ' + S.wave, W / 2, H / 2 - 60); ctx.globalAlpha = 1; }
+
+  if (S.state !== 'play') {
+    ctx.fillStyle = 'rgba(11,16,32,.72)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#ffc94a'; ctx.font = '700 28px Silkscreen, monospace';
+    const msg = { title: 'LAMPBEARER', over: 'THE LAMP DIMS', paused: 'PAUSED' }[S.state];
+    ctx.fillText(msg, W / 2, H / 2 - 50);
+    ctx.font = '12px Silkscreen, monospace'; ctx.fillStyle = '#e9e6f5';
+    if (S.state === 'title') {
+      ctx.fillText('"The light shines in the darkness,', W / 2, H / 2 - 10);
+      ctx.fillText('and the darkness has not overcome it."', W / 2, H / 2 + 8);
+      ctx.fillStyle = '#9aa0c3'; ctx.fillText('JOHN 1:5', W / 2, H / 2 + 28);
+    }
+    if (S.state === 'over') ctx.fillText('SCORE ' + S.score + '   WAVE ' + S.wave, W / 2, H / 2 - 10);
+    ctx.fillStyle = '#fff3c4';
+    if (Math.floor(S.t * 2) % 2 || reduce) ctx.fillText(S.state === 'paused' ? 'TAP OR PRESS P TO RESUME' : 'TAP OR PRESS SPACE', W / 2, H / 2 + 70);
+  }
+}
+
+// ---------- input ----------
+function begin() {
+  if (S.state === 'title' || S.state === 'over') { const b = best; reset(); best = b; S.state = 'play'; startWave(); }
+  else if (S.state === 'paused') S.state = 'play';
+}
+function togglePause() {
+  if (S.state === 'play') S.state = 'paused'; else if (S.state === 'paused') S.state = 'play';
+  $('pauseBtn').textContent = S.state === 'paused' ? 'RESUME' : 'PAUSE';
+}
+addEventListener('keydown', e => {
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (['ArrowLeft', 'ArrowRight', ' '].includes(k)) e.preventDefault();
+  if (k === 'p') { togglePause(); return; }
+  if (k === ' ' && S.state !== 'play') { begin(); return; }
+  keys[k] = true;
+});
+addEventListener('keyup', e => { keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; if (S.state === 'play') togglePause(); });
+
+const pointer = { active: false, x: W / 2 };
+function px(e) { const r = cv.getBoundingClientRect(); return (e.clientX - r.left) / r.width * W; }
+cv.addEventListener('pointerdown', e => {
+  if (S.state !== 'play') { begin(); $('pauseBtn').textContent = 'PAUSE'; return; }
+  pointer.active = true; pointer.x = px(e); cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', e => { if (pointer.active) pointer.x = px(e); });
+['pointerup', 'pointercancel'].forEach(t => cv.addEventListener(t, () => pointer.active = false));
+$('pauseBtn').addEventListener('click', togglePause);
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
